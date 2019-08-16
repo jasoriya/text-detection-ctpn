@@ -7,6 +7,7 @@ import time
 import cv2
 import numpy as np
 import tensorflow as tf
+import image_slicer
 
 sys.path.append(os.getcwd())
 from nets import model_train as model
@@ -50,6 +51,39 @@ def resize_image(img):
     re_im = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
     return re_im, (new_h / img_size[0], new_w / img_size[1])
 
+def slice_and_predict(im_fn, num_slice, sess, bbox_pred, cls_prob, 
+                      input_image, input_im_info):
+    try:
+        tiles = image_slicer.slice(im_fn, num_slice, save=False)
+    except:
+        print("Error reading image {}!".format(im_fn))
+    all_boxes = []
+    for tile in tiles:
+        im = np.array(tile.image)
+        im = cv2.merge((im, im, im))
+        img, (rh, rw) = resize_image(im)
+        h, w, c = img.shape
+        im_info = np.array([h, w, c]).reshape([1, 3])
+        bbox_pred_val, cls_prob_val = sess.run([bbox_pred, cls_prob], 
+                                               feed_dict={input_image: [img], 
+                                               input_im_info: im_info})
+
+        textsegs, _ = proposal_layer(cls_prob_val, bbox_pred_val, im_info)
+        scores = textsegs[:, 0]
+        textsegs = textsegs[:, 1:5]
+
+        textdetector = TextDetector(DETECT_MODE='H')
+        boxes = textdetector.detect(textsegs, scores[:, np.newaxis], img.shape[:2])
+        boxes[:, ::2][:, :-1] //= rh #resize x-axis of bb to org tile
+        boxes[:, 1::2] //= rw #resize y-axis of bb to org tile
+        boxes[:, ::2][:, :-1] += tile.coords[0] #translate x-axis of bb to org img
+        boxes[:, 1::2] += tile.coords[1] #translate y-axis of bb to org img
+        all_boxes.append(boxes)
+    return np.vstack(all_boxes)
+        
+        
+        
+
 
 def main(argv=None):
     if os.path.exists(FLAGS.output_path):
@@ -80,40 +114,26 @@ def main(argv=None):
                 print(im_fn)
                 start = time.time()
                 try:
-                    im = cv2.imread(im_fn)[:, :, ::-1]
+                    img = cv2.imread(im_fn)
                 except:
                     print("Error reading image {}!".format(im_fn))
                     continue
 
-                img, (rh, rw) = resize_image(im)
-                h, w, c = img.shape
-                im_info = np.array([h, w, c]).reshape([1, 3])
-                bbox_pred_val, cls_prob_val = sess.run([bbox_pred, cls_prob],
-                                                       feed_dict={input_image: [img],
-                                                                  input_im_info: im_info})
-
-                textsegs, _ = proposal_layer(cls_prob_val, bbox_pred_val, im_info)
-                scores = textsegs[:, 0]
-                textsegs = textsegs[:, 1:5]
-
-                textdetector = TextDetector(DETECT_MODE='H')
-                boxes = textdetector.detect(textsegs, scores[:, np.newaxis], img.shape[:2])
-                boxes = np.array(boxes, dtype=np.int)
-
+                boxes = slice_and_predict(im_fn, 9, sess, bbox_pred, cls_prob, 
+                      input_image, input_im_info)
                 cost_time = (time.time() - start)
                 print("cost time: {:.2f}s".format(cost_time))
 
                 for i, box in enumerate(boxes):
-                    cv2.polylines(img, [box[:8].astype(np.int32).reshape((-1, 1, 2))], True, color=(0, 255, 0),
-                                  thickness=2)
-                img = cv2.resize(img, None, None, fx=1.0 / rh, fy=1.0 / rw, interpolation=cv2.INTER_LINEAR)
-                cv2.imwrite(os.path.join(FLAGS.output_path, os.path.basename(im_fn)), img[:, :, ::-1])
+                    cv2.polylines(img, [box[:8].astype(np.int32).reshape((-1, 1, 2))], True, color=(0, 255, 0), thickness=2)
+#                img = cv2.resize(img, None, None, fx=1.0 / rh, fy=1.0 / rw, interpolation=cv2.INTER_LINEAR)
+                cv2.imwrite(os.path.join(FLAGS.output_path, os.path.basename(im_fn)), img)
 
                 with open(os.path.join(FLAGS.output_path, os.path.splitext(os.path.basename(im_fn))[0]) + ".txt",
                           "w") as f:
                     for i, box in enumerate(boxes):
-                        line = ",".join(str(box[k]) for k in range(8))
-                        line += "," + str(scores[i]) + "\r\n"
+                        line = ",".join(str(box[k]) for k in range(9))
+                        line += "\r\n"
                         f.writelines(line)
 
 
